@@ -4,22 +4,24 @@ open Cohttp_lwt_unix
 let (let*) = Lwt.bind
 let (and*) = Lwt.both
 
+module Json = Yojson.Safe
+
 type fetch_result = {
-  candidate: Yojson.Safe.t; 
-  reference: Yojson.Safe.t
+  candidate: Json.t; 
+  reference: Json.t
 }
 
 type diff =
   | ObjectDiff of (string * diff) list
   | ArrayDiff of diff list
-  | ValueDiff of Yojson.Safe.t * Yojson.Safe.t
+  | ValueDiff of Json.t * Json.t
   | MissingArrayElem of int
   | MissingObjectKey of string
 
-let rec yojson_of_diff (diff:diff) : Yojson.Safe.t =
+let rec json_of_diff (diff:diff) : Json.t =
   match diff with
-  | ObjectDiff l -> `Assoc(l |> List.map(fun (k,v) -> (k, yojson_of_diff v)))
-  | ArrayDiff l -> `List(l |> List.map yojson_of_diff)
+  | ObjectDiff l -> `Assoc(l |> List.map(fun (k,v) -> (k, json_of_diff v)))
+  | ArrayDiff l -> `List(l |> List.map json_of_diff)
   | ValueDiff (candidate, reference) -> 
     `Assoc([
       ("kind", `String("value_diff"));
@@ -39,10 +41,10 @@ let rec yojson_of_diff (diff:diff) : Yojson.Safe.t =
 
 type diff_result = {path: string; diff: diff option}
 
-let yojson_of_diff_result result: Yojson.Safe.t =
+let json_of_diff_result result: Json.t =
   let diff_list = 
     result.diff 
-      |> Option.map yojson_of_diff 
+      |> Option.map json_of_diff 
       |> Option.to_list
   in
   `Assoc([
@@ -50,14 +52,14 @@ let yojson_of_diff_result result: Yojson.Safe.t =
     ("diff", `List(diff_list))
   ])
 
-let rec diff_json (candidate: Yojson.Safe.t) (reference:Yojson.Safe.t) =
+let rec diff_json (candidate: Json.t) (reference:Json.t) =
     match (candidate, reference) with
     | (`Assoc(c), `Assoc(r)) -> diff_json_object c r
     | (`List(c), `List(r))   -> diff_json_array c r
     | (c, r)                 -> diff_json_value c r
 
 and diff_json_value candidate reference =
-    if Yojson.Safe.equal candidate reference then 
+    if Json.equal candidate reference then 
       None 
     else 
       Some(ValueDiff(candidate,reference))
@@ -66,7 +68,7 @@ and diff_json_value candidate reference =
 and diff_json_array candidate reference =
   let unpack i x = (i,x) in
   let step (i,c) =
-    match reference |> List.find_opt (Yojson.Safe.equal c) with 
+    match reference |> List.find_opt (Json.equal c) with 
     | Some e -> diff_json c e
     | None -> Some(MissingArrayElem i)
   in
@@ -97,7 +99,7 @@ and diff_json_object candidate reference =
 let fetch_json uri =
   let* (_, body) = Client.get (Uri.of_string uri) in
   let* body_str = body |> Cohttp_lwt.Body.to_string in 
-  body_str |> Yojson.Safe.from_string |> Lwt.return
+  body_str |> Json.from_string |> Lwt.return
 
 let fetch_both_json candidate reference path =
   let* candidate_json = fetch_json (String.concat "" [candidate; path]) 
@@ -107,8 +109,8 @@ let fetch_both_json candidate reference path =
 let compute_diff_result candidate reference path =
   let* fetched = fetch_both_json candidate reference path in
   let diff = diff_json fetched.candidate fetched.reference in
-  let json = yojson_of_diff_result {path; diff} in
-  json |> Yojson.Safe.to_string |> print_endline;
+  let json = json_of_diff_result {path; diff} in
+  json |> Json.to_string |> print_endline;
   Lwt.return_unit
 
 let main =
