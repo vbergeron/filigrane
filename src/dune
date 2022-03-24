@@ -1,0 +1,4 @@
+(executable
+ (name filigrane)
+ (libraries 
+  cohttp-lwt-unix yojson))
