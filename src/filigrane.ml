@@ -156,8 +156,7 @@ let main =
   Printf.printf "Scheme : %s\n" !scheme;
   Printf.printf "Reference : %s\n" !reference;
   Printf.printf "Candidate : %s\n" !candidate;
-
-  
+  flush stdout;
 
   server !candidate !reference !scheme !port
 
