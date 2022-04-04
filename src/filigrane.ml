@@ -52,6 +52,7 @@ let json_of_diff_result result: Json.t =
     ("diff", `List(diff_list))
   ])
 
+
 let rec diff_json (candidate: Json.t) (reference:Json.t) =
     match (candidate, reference) with
     | (`Assoc(c), `Assoc(r)) -> diff_json_object c r
@@ -68,11 +69,11 @@ and diff_json_value candidate reference =
 and diff_json_array candidate reference =
   let unpack i x = (i,x) in
   let step (i,c) =
-    match reference |> List.find_opt (Json.equal c) with 
+    match candidate |> List.find_opt (Json.equal c) with 
     | Some e -> diff_json c e
     | None -> Some(MissingArrayElem i)
   in
-  let diff_list = candidate 
+  let diff_list = reference
     |> List.mapi unpack 
     |> List.filter_map step 
   in
@@ -84,11 +85,11 @@ and diff_json_array candidate reference =
 and diff_json_object candidate reference =
   let find c (k,_) = String.equal c k in
   let step (k,v) =
-    match reference |> List.find_opt (find k) with
+    match candidate |> List.find_opt (find k) with
     | Some (_, vv) -> diff_json v vv |> Option.map(fun (x) -> (k,x))
     | None -> Some((k,MissingObjectKey k))
   in
-  let diff_list = candidate 
+  let diff_list = reference
     |> List.filter_map step 
   in
   if List.length diff_list > 0 then
@@ -96,53 +97,68 @@ and diff_json_object candidate reference =
   else
     None
 
-let fetch_json uri =
-  let* (_, body) = Client.get (Uri.of_string uri) in
+let relay_request scheme host req body =
+  let meth    = req |> Request.meth in 
+  let headers = Cohttp.Header.add req.headers "Host" host |> Cohttp.Header.clean_dup in
+  let uri     = [scheme; "://"; host; req.resource] |> String.concat "" |> Uri.of_string in
+  print_endline (String.concat " " [Cohttp.Code.string_of_method meth; Uri.to_string uri]);
+  Client.call ~headers ~body:body meth uri
+
+let decode_body_json body =
   let* body_str = body |> Cohttp_lwt.Body.to_string in 
   body_str |> Json.from_string |> Lwt.return
 
-let fetch_both_json candidate reference path =
-  let* candidate_json = fetch_json (String.concat "" [candidate; path]) 
-  and* reference_json = fetch_json (String.concat "" [reference; path]) in
-  Lwt.return {candidate = candidate_json; reference = reference_json}  
+let server candidate reference scheme port =
+  let callback _conn req body =
 
-let compute_diff_result candidate reference path =
-  let* fetched = fetch_both_json candidate reference path in
-  let diff = diff_json fetched.candidate fetched.reference in
-  let json = json_of_diff_result {path; diff} in
-  json |> Json.to_string |> print_endline;
-  Lwt.return_unit
+    let* (_, candidate_body) = relay_request scheme candidate req body
+    and* (r, reference_body) = relay_request scheme reference req body in
+
+    let* candidate_json = decode_body_json candidate_body
+    and* reference_json = decode_body_json reference_body in
+    
+    let diff = diff_json candidate_json reference_json in
+    let json = json_of_diff_result {path = req.resource; diff} in
+    
+    let body = json
+      |> Json.to_string 
+      |> Cohttp_lwt.Body.of_string in
+
+    Server.respond ~status:r.status ~body ()
+  in
+    Server.create ~mode:(`TCP (`Port port)) (Server.make ~callback ())
+
 
 let main =
+  let port = ref 8000 in
+  let scheme = ref "https" in
   let candidate = ref "" in
   let reference = ref "" in
-  let paths = ref [] in
+  let rest = ref [] in
 
   let args = [
-    ("--candidate", Arg.Set_string candidate, "candidate url");
-    ("--reference", Arg.Set_string reference, "candidate url");
+    ("--port", Arg.Set_int port, "port to expose: default 8000");
+    ("--scheme", Arg.Set_string scheme, "scheme to use (one of http, https. default https)");
+    ("--candidate", Arg.Set_string candidate, "candidate host");
+    ("--reference", Arg.Set_string reference, "candidate host");
   ] in
 
-  let rest path = paths := path::!paths in
+  let rest path = rest := path::!rest in
 
   let usage = String.concat "\n" [
     "Filigrane : a useful REST API diff tool";
-    "Usage: filigrane --candidate <candidate> --reference <reference> <path1> [<path2>] ..."
+    "Usage: filigrane --candidate <candidate> --reference <reference>"
    ] in
 
   Arg.parse args rest usage;
+  
+  Printf.printf "Filigrane proxy server starting on port %d\n" !port;
+  Printf.printf "Scheme : %s\n" !scheme;
+  Printf.printf "Reference : %s\n" !reference;
+  Printf.printf "Candidate : %s\n" !candidate;
+  flush stdout;
 
-  let handle_path path =
-    compute_diff_result !candidate !reference path
-  in
-
-  let rec handle_paths paths =
-    match paths with
-    | head :: tail -> let* _ = handle_path head in handle_paths tail
-    | [] -> Lwt.return_unit
-  in
-
-  handle_paths !paths
+  server !candidate !reference !scheme !port
 
 let () =
   Lwt_main.run main
